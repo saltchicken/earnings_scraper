@@ -5,19 +5,16 @@ import json
 import requests
 from dotenv import load_dotenv
 
-# Fallback in case algotrader.logger isn't available in the execution environment
-try:
-    from algotrader.logger import get_logger
+# Import the wikipedia scraper
+from wikipedia_scraper import get_sp500_symbols
 
-    logger = get_logger(__name__)
-except ImportError:
-    import logging
+import logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-    logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 class PolygonClient:
@@ -35,16 +32,24 @@ class PolygonClient:
             )
 
         self.base_url = "https://api.polygon.io"
+        self.last_request_time = 0.0  # Track the time of the last API call
 
     def _make_request(self, url: str, max_retries: int = 2) -> requests.Response:
         """
         Internal helper to make requests with automatic retry on 429 (Rate Limit).
+        Enforces a strict rate limit of 1 request every 13 seconds.
         Polygon's free tier limits users to 5 requests per minute.
         """
         wait_time = 60
 
         for attempt in range(max_retries):
+            # Enforce the 13-second delay between requests
+            elapsed_time = time.time() - self.last_request_time
+            if elapsed_time < 13.0:
+                time.sleep(13.0 - elapsed_time)
+
             response = requests.get(url)
+            self.last_request_time = time.time()
 
             if response.status_code == 429:
                 logger.warning(
@@ -261,8 +266,31 @@ class EarningsScanner:
             curr_report = financials[0]
             prev_report = financials[1]
 
-            curr_filing_date = curr_report.get("filing_date")
+            # Fallback to end_date if Polygon's vX API is missing the filing_date
+            curr_filing_date = curr_report.get("filing_date") or curr_report.get("end_date")
             last_seen_date = self.state.get(symbol)
+
+            # Calculate and log the current percent change regardless of new filings
+            curr_ni = self._extract_net_income(curr_report)
+            prev_ni = self._extract_net_income(prev_report)
+            pct_change = None
+
+            if curr_ni is not None and prev_ni is not None:
+                # Calculate percentage change
+                if prev_ni == 0:
+                    pct_change = float("inf") if curr_ni > 0 else float("-inf")
+                else:
+                    pct_change = ((curr_ni - prev_ni) / abs(prev_ni)) * 100
+
+                # Added raw dollar amounts to provide context for extreme percentage swings
+                logger.info(
+                    f"[{symbol}] Current Net Income Change: {pct_change:.2f}% "
+                    f"(Prev: ${prev_ni:,.0f} -> Curr: ${curr_ni:,.0f})"
+                )
+            else:
+                logger.warning(
+                    f"[{symbol}] Could not extract net income from the financials payload."
+                )
 
             # 1. Initialize state if symbol is completely new
             if not last_seen_date:
@@ -279,26 +307,10 @@ class EarningsScanner:
                     f"[{symbol}] New report detected! Filed on {curr_filing_date}."
                 )
 
-                curr_ni = self._extract_net_income(curr_report)
-                prev_ni = self._extract_net_income(prev_report)
-
-                if curr_ni is not None and prev_ni is not None:
-                    # Calculate percentage change
-                    if prev_ni == 0:
-                        pct_change = float("inf") if curr_ni > 0 else float("-inf")
-                    else:
-                        pct_change = ((curr_ni - prev_ni) / abs(prev_ni)) * 100
-
-                    logger.info(f"[{symbol}] Net Income Change: {pct_change:.2f}%")
-
-                    # 3. Trigger Notification if threshold met
-                    if pct_change >= self.threshold_pct:
-                        self._send_notification(
-                            symbol, pct_change, curr_ni, prev_ni, curr_filing_date
-                        )
-                else:
-                    logger.warning(
-                        f"[{symbol}] Could not extract net income from the financials payload."
+                # 3. Trigger Notification if threshold met
+                if pct_change is not None and pct_change >= self.threshold_pct:
+                    self._send_notification(
+                        symbol, pct_change, curr_ni, prev_ni, curr_filing_date
                     )
 
                 # 4. Update state to reflect we've processed this new report
@@ -311,8 +323,13 @@ class EarningsScanner:
 
 
 if __name__ == "__main__":
-    # Define the list of symbols you want to track
-    TARGET_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA"]
+    # Fetch S&P 500 symbols dynamically using the Wikipedia scraper
+    logger.info("Loading S&P 500 symbols from Wikipedia...")
+    raw_symbols = get_sp500_symbols()
+    
+    # Polygon uses dots (e.g., BRK.B) instead of dashes (BRK-B) for class shares.
+    # The wikipedia_scraper formats them with dashes for Alpaca, so we revert them here.
+    TARGET_SYMBOLS = [symbol.replace("-", ".") for symbol in raw_symbols]
 
     # Notify if net income is up 15% or more QoQ
     scanner = EarningsScanner(symbols=TARGET_SYMBOLS, threshold_pct=15.0)
