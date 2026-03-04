@@ -10,11 +10,32 @@ from wikipedia_scraper import get_sp500_symbols
 
 import logging
 
+# --- Standard Console Logger ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# --- Setup Custom File Loggers ---
+def setup_file_logger(name: str, log_file: str) -> logging.Logger:
+    """Helper to create a dedicated file logger that won't print to console."""
+    file_logger = logging.getLogger(name)
+    file_logger.setLevel(logging.INFO)
+    file_logger.propagate = False  # Prevent propagating to root logger (console)
+    
+    # Avoid adding multiple handlers if the logger is already initialized
+    if not file_logger.handlers:
+        handler = logging.FileHandler(log_file)
+        formatter = logging.Formatter("%(asctime)s - %(message)s")
+        handler.setFormatter(formatter)
+        file_logger.addHandler(handler)
+        
+    return file_logger
+
+# Initialize our two distinct log files
+changes_logger = setup_file_logger("changes_logger", "all_net_income_changes.log")
+alerts_logger = setup_file_logger("alerts_logger", "threshold_alerts.log")
 
 
 class PolygonClient:
@@ -236,16 +257,25 @@ class EarningsScanner:
         """
         Handles pushing out the alert. Replace/expand this with Slack, Email, or SMS logic.
         """
-        msg = (
+        # Format for multi-line console output 
+        console_msg = (
             f"🚨 EARNINGS ALERT: {symbol} 🚨\n"
             f"Filing Date: {filing_date}\n"
             f"Net Income surged by {pct_change:.2f}%!\n"
             f"Previous Qtr: ${prev_ni:,.2f} | Current Qtr: ${curr_ni:,.2f}"
         )
-        logger.info(f"\n{'-'*40}\n{msg}\n{'-'*40}")
+        logger.info(f"\n{'-'*40}\n{console_msg}\n{'-'*40}")
+        
+        # Format for single-line file logging
+        file_msg = (
+            f"🚨 ALERT: [{symbol}] | Date: {filing_date} | "
+            f"Change: +{pct_change:.2f}% | "
+            f"Prev: ${prev_ni:,.0f} -> Curr: ${curr_ni:,.0f}"
+        )
+        alerts_logger.info(file_msg)
 
         # Example Slack webhook hookout:
-        # requests.post("YOUR_SLACK_WEBHOOK_URL", json={"text": msg})
+        # requests.post("YOUR_SLACK_WEBHOOK_URL", json={"text": console_msg})
 
     def run(self):
         """Executes the daily scan loop for all configured symbols."""
@@ -282,11 +312,16 @@ class EarningsScanner:
                 else:
                     pct_change = ((curr_ni - prev_ni) / abs(prev_ni)) * 100
 
-                # Added raw dollar amounts to provide context for extreme percentage swings
-                logger.info(
+                # Formulate the change log string
+                change_log_str = (
                     f"[{symbol}] Current Net Income Change: {pct_change:.2f}% "
                     f"(Prev: ${prev_ni:,.0f} -> Curr: ${curr_ni:,.0f})"
                 )
+                
+                # Send to both console and the dedicated changes file
+                logger.info(change_log_str)
+                changes_logger.info(change_log_str)
+                
             else:
                 logger.warning(
                     f"[{symbol}] Could not extract net income from the financials payload."
