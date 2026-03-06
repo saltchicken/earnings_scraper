@@ -1,10 +1,9 @@
-import os
 import time
+import os
 import sqlite3
 import requests
 import logging
 from dotenv import load_dotenv
-from wikipedia_scraper import get_sp500_symbols
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    def __init__(self, db_name="sp500_financials.db"):
+    def __init__(self, db_name="financials.db"):
         self.db_name = db_name
         self._init_db()
 
@@ -23,8 +22,6 @@ class DatabaseManager:
         """Creates the database and tables if they don't exist."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            # Create a table with a UNIQUE constraint on symbol + year + quarter
-            # so we can re-run this script without creating duplicate rows.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS quarterly_financials (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,14 +192,19 @@ class BulkPolygonScraper:
         for i, symbol in enumerate(symbols):
             logger.info(f"Processing {symbol} ({i+1}/{len(symbols)})...")
             self.fetch_all_history(symbol)
-        logger.info("Bulk scrape complete! Data saved to sp500_financials.db")
+        logger.info(f"Bulk scrape complete! Data saved to {self.db.db_name}")
 
 
 if __name__ == "__main__":
-    logger.info("Loading S&P 500 symbols from Wikipedia...")
-    raw_symbols = get_sp500_symbols()
+    logger.info("Loading custom symbols...")
+    try:
+        with open('symbols.txt', 'r') as f:
+            raw_symbols = [line.strip() for line in f.readlines() if line.strip()]
+    except FileNotFoundError:
+        logger.error("symbols.txt not found.")
+        raw_symbols = []
+
     TARGET_SYMBOLS = [symbol.replace("-", ".") for symbol in raw_symbols]
 
     scraper = BulkPolygonScraper()
-    # Note: On a free tier, 500 symbols * 13 seconds = ~108 minutes to run.
     scraper.run(TARGET_SYMBOLS)
